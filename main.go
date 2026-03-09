@@ -16,13 +16,19 @@ import (
 )
 
 const (
-	signalingAddr   = "127.0.0.1:8080"
 	pionServerIP    = "127.0.0.2"
 	pionServerPort  = "5004"
 	testDurationSec = 30
 	packetInterval  = 10 * time.Millisecond
 	payloadSize     = 1400
 )
+
+var signalingAddr = func() string {
+    if v := os.Getenv("SIGNAL_ADDR"); v != "" {
+        return v
+    }
+    return "127.0.0.1:8080"
+}()
 
 type TestResult struct {
 	TestID         string    `json:"test_id"`
