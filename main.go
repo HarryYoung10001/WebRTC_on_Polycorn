@@ -2,32 +2,36 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v3/pkg/media"
+	"github.com/pion/webrtc/v3/pkg/media/h264reader"
 )
 
 const (
 	pionServerIP    = "127.0.0.2"
 	pionServerPort  = "5004"
-	testDurationSec = 30
-	packetInterval  = 10 * time.Millisecond
-	payloadSize     = 1400
+	testDurationSec = 45
+
+	defaultVideoFile = "media/bbb_45s.h264"
+	defaultVideoFPS  = 30
 )
 
 var signalingAddr = func() string {
-    if v := os.Getenv("SIGNAL_ADDR"); v != "" {
-        return v
-    }
-    return "127.0.0.1:8080"
+	if v := os.Getenv("SIGNAL_ADDR"); v != "" {
+		return v
+	}
+	return "127.0.0.1:8080"
 }()
 
 type TestResult struct {
@@ -37,10 +41,6 @@ type TestResult struct {
 	TotalBytesTx   int64     `json:"total_bytes_tx"`
 	TotalBytesRx   int64     `json:"total_bytes_rx"`
 	ThroughputMbps float64   `json:"throughput_mbps"`
-	LatencyMs      []float64 `json:"latency_ms"`
-	AvgLatencyMs   float64   `json:"avg_latency_ms"`
-	MinLatencyMs   float64   `json:"min_latency_ms"`
-	MaxLatencyMs   float64   `json:"max_latency_ms"`
 	PacketsTx      int       `json:"packets_tx"`
 	PacketsRx      int       `json:"packets_rx"`
 }
@@ -51,12 +51,28 @@ var (
 	bytesRx       int64
 	packetsTx     int
 	packetsRx     int
-	latencies     []float64
 	testStartTime time.Time
 )
 
+func getVideoFile() string {
+	if v := os.Getenv("VIDEO_FILE"); v != "" {
+		return v
+	}
+	return defaultVideoFile
+}
+
+func getVideoFPS() int {
+	if v := os.Getenv("VIDEO_FPS"); v != "" {
+		if fps, err := strconv.Atoi(v); err == nil && fps > 0 {
+			return fps
+		}
+	}
+	return defaultVideoFPS
+}
+
 func runServer() {
 	listenAddr := "0.0.0.0:" + pionServerPort
+
 	api, err := newServerAPI(listenAddr, pionServerIP)
 	if err != nil {
 		panic(err)
@@ -71,46 +87,71 @@ func runServer() {
 		fmt.Println("[server] ICE state:", state)
 	})
 
-	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-		fmt.Println("[server] DataChannel opened:", dc.Label())
+	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
+		fmt.Println("[server] Track received:",
+			"kind=", track.Kind().String(),
+			"codec=", track.Codec().MimeType)
 
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-			if len(msg.Data) >= 8 {
-				sentTime := time.Unix(0, int64(binary.BigEndian.Uint64(msg.Data[:8])))
-				latency := time.Since(sentTime).Seconds() * 1000
-
-				resultMu.Lock()
-				latencies = append(latencies, latency)
-				bytesRx += int64(len(msg.Data))
-				packetsRx++
-				resultMu.Unlock()
-
-				response := make([]byte, 8+len(msg.Data[8:]))
-				copy(response[:8], msg.Data[:8])
-				copy(response[8:], []byte("pong"))
-				dc.Send(response)
+		for {
+			pkt, _, err := track.ReadRTP()
+			if err != nil {
+				fmt.Println("[server] track read ended:", err)
+				return
 			}
-		})
+
+			resultMu.Lock()
+			bytesRx += int64(len(pkt.Payload))
+			packetsRx++
+			resultMu.Unlock()
+		}
 	})
 
 	http.HandleFunc("/offer", func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
 		var offer webrtc.SessionDescription
-		json.NewDecoder(r.Body).Decode(&offer)
-		pc.SetRemoteDescription(offer)
-		answer, _ := pc.CreateAnswer(nil)
+		if err := json.NewDecoder(r.Body).Decode(&offer); err != nil {
+			http.Error(w, "decode offer failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := pc.SetRemoteDescription(offer); err != nil {
+			http.Error(w, "set remote description failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		answer, err := pc.CreateAnswer(nil)
+		if err != nil {
+			http.Error(w, "create answer failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
 		gatherDone := webrtc.GatheringCompletePromise(pc)
-		pc.SetLocalDescription(answer)
+		if err := pc.SetLocalDescription(answer); err != nil {
+			http.Error(w, "set local description failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		<-gatherDone
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(pc.LocalDescription())
+		if err := json.NewEncoder(w).Encode(pc.LocalDescription()); err != nil {
+			http.Error(w, "encode answer failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	})
 
 	fmt.Printf("[server] signaling HTTP on %s\n", signalingAddr)
 	fmt.Printf("[server] pion TCP on %s:%s\n", pionServerIP, pionServerPort)
-	http.ListenAndServe(signalingAddr, nil)
+
+	if err := http.ListenAndServe(signalingAddr, nil); err != nil {
+		panic(err)
+	}
 }
 
 func runClient() {
+	videoFile := getVideoFile()
+	videoFPS := getVideoFPS()
+
 	api, err := newClientAPI()
 	if err != nil {
 		panic(err)
@@ -121,106 +162,100 @@ func runClient() {
 		panic(err)
 	}
 
+	connectedChan := make(chan struct{})
+	var connectedOnce sync.Once
+
 	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		fmt.Println("[client] ICE state:", state)
+
+		if state == webrtc.ICEConnectionStateConnected {
+			connectedOnce.Do(func() { close(connectedChan) })
+		}
+
 		if state == webrtc.ICEConnectionStateFailed {
 			fmt.Println("[client] ICE failed, exiting")
 			os.Exit(1)
 		}
 	})
 
-	dc, err := pc.CreateDataChannel("test", nil)
+	videoTrack, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypeH264,
+			ClockRate: 90000,
+		},
+		"video",
+		"pion",
+	)
 	if err != nil {
 		panic(err)
 	}
 
-	// announce test completed by channel
-	doneChan := make(chan struct{})
-	var closeOnce sync.Once
-	closeDone := func() { closeOnce.Do(func() { close(doneChan) }) }
-	testFailed := false
+	rtpSender, err := pc.AddTrack(videoTrack)
+	if err != nil {
+		panic(err)
+	}
 
-	dc.OnOpen(func() {
-		fmt.Println("[client] DataChannel open, starting measurement...")
-		testStartTime = time.Now()
-
-		go func() {
-			ticker := time.NewTicker(packetInterval)
-			defer ticker.Stop()
-
-			payload := make([]byte, payloadSize)
-			endTime := time.Now().Add(time.Duration(testDurationSec) * time.Second)
-
-			for time.Now().Before(endTime) {
-				<-ticker.C
-				timestamp := make([]byte, 8)
-				binary.BigEndian.PutUint64(timestamp, uint64(time.Now().UnixNano()))
-
-				buf := append(timestamp, payload...)
-				if err := dc.Send(buf); err != nil {
-					fmt.Println("[client] send error:", err)
-					return
-				}
-				resultMu.Lock()
-				bytesTx += int64(len(buf))
-				packetsTx++
-				resultMu.Unlock()
+	go func() {
+		rtcpBuf := make([]byte, 1500)
+		for {
+			if _, _, err := rtpSender.Read(rtcpBuf); err != nil {
+				return
 			}
-		}()
-
-		// acknowledge after test
-		go func() {
-			time.Sleep(time.Duration(testDurationSec+2) * time.Second)
-			closeDone()
-		}()
-	})
-
-	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
-		if len(msg.Data) >= 8 {
-			sentTime := time.Unix(0, int64(binary.BigEndian.Uint64(msg.Data[:8])))
-			latency := time.Since(sentTime).Seconds() * 1000
-
-			resultMu.Lock()
-			latencies = append(latencies, latency)
-			bytesRx += int64(len(msg.Data))
-			packetsRx++
-			resultMu.Unlock()
 		}
-	})
+	}()
 
-	dc.OnClose(func() {
-		fmt.Println("[client] DataChannel closed")
-		if !testFailed {
-			closeDone()
-		}
-	})
+	offer, err := pc.CreateOffer(nil)
+	if err != nil {
+		panic(err)
+	}
 
-	// give offer
-	offer, _ := pc.CreateOffer(nil)
 	gatherDone := webrtc.GatheringCompletePromise(pc)
-	pc.SetLocalDescription(offer)
+	if err := pc.SetLocalDescription(offer); err != nil {
+		panic(err)
+	}
 	<-gatherDone
 
-	offerJSON, _ := json.Marshal(pc.LocalDescription())
-	resp, _ := http.Post("http://"+signalingAddr+"/offer", "application/json", bytes.NewReader(offerJSON))
+	offerJSON, err := json.Marshal(pc.LocalDescription())
+	if err != nil {
+		panic(err)
+	}
+
+	resp, err := http.Post("http://"+signalingAddr+"/offer", "application/json", bytes.NewReader(offerJSON))
+	if err != nil {
+		panic(err)
+	}
 	defer resp.Body.Close()
 
 	var answer webrtc.SessionDescription
-	json.NewDecoder(resp.Body).Decode(&answer)
-	pc.SetRemoteDescription(answer)
+	if err := json.NewDecoder(resp.Body).Decode(&answer); err != nil {
+		panic(err)
+	}
+	if err := pc.SetRemoteDescription(answer); err != nil {
+		panic(err)
+	}
 
 	fmt.Println("[client] waiting for connection...")
 
-	// waiting for test completed or timeout
 	select {
-	case <-doneChan:
-		fmt.Println("[client] test completed")
-	case <-time.After(time.Duration(testDurationSec+10) * time.Second):
-		fmt.Println("[client] test timeout")
-		testFailed = true
+	case <-connectedChan:
+		fmt.Println("[client] connected, start streaming video")
+		fmt.Println("[client] video file:", videoFile)
+		fmt.Println("[client] video fps:", videoFPS)
+
+		testStartTime = time.Now()
+
+		if err := streamH264(videoTrack, videoFile, videoFPS, testDurationSec); err != nil {
+			fmt.Println("[client] stream error:", err)
+			os.Exit(1)
+		}
+
+		fmt.Println("[client] video streaming completed")
+
+	case <-time.After(10 * time.Second):
+		fmt.Println("[client] connection timeout")
+		os.Exit(1)
 	}
 
-	// calculate and memory
 	resultMu.Lock()
 	result := calculateResult()
 	resultMu.Unlock()
@@ -228,14 +263,66 @@ func runClient() {
 	saveResult(result)
 
 	fmt.Println("\n==================================================")
-	fmt.Printf("✓ Test completed successfully\n")
+	fmt.Printf("✓ Video test completed successfully\n")
 	fmt.Printf("  Throughput: %.2f Mbps\n", result.ThroughputMbps)
-	fmt.Printf("  Avg Latency: %.2f ms\n", result.AvgLatencyMs)
 	fmt.Printf("  Packets: %d tx / %d rx\n", result.PacketsTx, result.PacketsRx)
+	fmt.Printf("  Bytes: %d tx / %d rx\n", result.TotalBytesTx, result.TotalBytesRx)
 	fmt.Printf("  Results saved to: logs/webrtc/results.json\n")
 
-	pc.Close()
+	_ = pc.Close()
 	os.Exit(0)
+}
+
+func streamH264(track *webrtc.TrackLocalStaticSample, path string, fps int, durationSec int) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open h264 file: %w", err)
+	}
+	defer f.Close()
+
+	reader, err := h264reader.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("create h264 reader: %w", err)
+	}
+
+	frameDuration := time.Second / time.Duration(fps)
+	ticker := time.NewTicker(frameDuration)
+	defer ticker.Stop()
+
+	endTime := time.Now().Add(time.Duration(durationSec) * time.Second)
+
+	for time.Now().Before(endTime) {
+		nal, err := reader.NextNAL()
+		if err == io.EOF {
+			if _, err := f.Seek(0, 0); err != nil {
+				return fmt.Errorf("seek h264 file: %w", err)
+			}
+			reader, err = h264reader.NewReader(f)
+			if err != nil {
+				return fmt.Errorf("recreate h264 reader: %w", err)
+			}
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read nal failed: %w", err)
+		}
+
+		<-ticker.C
+
+		if err := track.WriteSample(media.Sample{
+			Data:     nal.Data,
+			Duration: frameDuration,
+		}); err != nil {
+			return fmt.Errorf("write sample failed: %w", err)
+		}
+
+		resultMu.Lock()
+		bytesTx += int64(len(nal.Data))
+		packetsTx++
+		resultMu.Unlock()
+	}
+
+	return nil
 }
 
 func calculateResult() TestResult {
@@ -243,38 +330,17 @@ func calculateResult() TestResult {
 	if duration <= 0 {
 		duration = float64(testDurationSec)
 	}
+
 	totalBytes := bytesTx + bytesRx
 	throughput := float64(totalBytes) * 8 / duration / 1e6
 
-	avgLatency := 0.0
-	minLatency := 999999.0
-	maxLatency := 0.0
-	for _, l := range latencies {
-		avgLatency += l
-		if l < minLatency {
-			minLatency = l
-		}
-		if l > maxLatency {
-			maxLatency = l
-		}
-	}
-	if len(latencies) > 0 {
-		avgLatency /= float64(len(latencies))
-	} else {
-		minLatency = 0
-	}
-
 	return TestResult{
-		TestID:         fmt.Sprintf("webrtc-%d", time.Now().Unix()),
+		TestID:         fmt.Sprintf("webrtc-video-%d", time.Now().Unix()),
 		Timestamp:      time.Now(),
 		DurationSec:    testDurationSec,
 		TotalBytesTx:   bytesTx,
 		TotalBytesRx:   bytesRx,
 		ThroughputMbps: throughput,
-		LatencyMs:      latencies,
-		AvgLatencyMs:   avgLatency,
-		MinLatencyMs:   minLatency,
-		MaxLatencyMs:   maxLatency,
 		PacketsTx:      packetsTx,
 		PacketsRx:      packetsRx,
 	}
@@ -291,22 +357,32 @@ func saveResult(result TestResult) {
 		}
 	}
 
-	os.MkdirAll(logDir, 0755)
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		panic(err)
+	}
 
-	jsonFile, _ := os.Create(filepath.Join(logDir, "results.json"))
+	jsonFile, err := os.Create(filepath.Join(logDir, "results.json"))
+	if err != nil {
+		panic(err)
+	}
 	defer jsonFile.Close()
+
 	encoder := json.NewEncoder(jsonFile)
 	encoder.SetIndent("", "  ")
-	encoder.Encode(result)
+	if err := encoder.Encode(result); err != nil {
+		panic(err)
+	}
 
-	summaryFile, _ := os.Create(filepath.Join(logDir, "summary.txt"))
+	summaryFile, err := os.Create(filepath.Join(logDir, "summary.txt"))
+	if err != nil {
+		panic(err)
+	}
 	defer summaryFile.Close()
+
 	fmt.Fprintf(summaryFile, "Test ID: %s\n", result.TestID)
 	fmt.Fprintf(summaryFile, "Timestamp: %s\n", result.Timestamp.Format(time.RFC3339))
 	fmt.Fprintf(summaryFile, "Duration: %d seconds\n", result.DurationSec)
 	fmt.Fprintf(summaryFile, "Throughput: %.2f Mbps\n", result.ThroughputMbps)
-	fmt.Fprintf(summaryFile, "Avg Latency: %.2f ms\n", result.AvgLatencyMs)
-	fmt.Fprintf(summaryFile, "Min/Max Latency: %.2f / %.2f ms\n", result.MinLatencyMs, result.MaxLatencyMs)
 	fmt.Fprintf(summaryFile, "Packets: %d tx / %d rx\n", result.PacketsTx, result.PacketsRx)
 	fmt.Fprintf(summaryFile, "Bytes: %d tx / %d rx\n", result.TotalBytesTx, result.TotalBytesRx)
 }
@@ -314,6 +390,7 @@ func saveResult(result TestResult) {
 func main() {
 	role := flag.String("role", "", "server or client")
 	flag.Parse()
+
 	switch *role {
 	case "server":
 		runServer()
