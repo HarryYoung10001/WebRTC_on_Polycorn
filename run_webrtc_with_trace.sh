@@ -1,23 +1,36 @@
 #!/bin/bash
 # Run pion/webrtc over polycorn with leoshell trace emulation (2-path multipath)
-# Usage: ./run_webrtc_with_trace.sh <trace_name> [duration_sec]
+# Usage:
+#   ./run_webrtc_with_trace.sh <path1_name> [path2_name] [duration_sec]
+# Example:
+#   ./run_webrtc_with_trace.sh 100-200_1 Anonymous_A_1 50
 
-TRACE_NAME=${1:?"Usage: $0 <trace_name> [duration_sec]"}
-DURATION=${2:-50}
+PATH1_NAME=${1:?"Usage: $0 <path1_name> [path2_name] [duration_sec]"}
+PATH2_NAME=${2:-Anonymous_A_1}
+DURATION=${3:-50}
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 POLYCORN="$SCRIPT_DIR/polycorn/target/release/polycorn_driver"
 PION_DIR="$SCRIPT_DIR/pion"
-LOG_DIR="$SCRIPT_DIR/logs/webrtc-trace/${TRACE_NAME}"
+
+TRACE_ROOT="$SCRIPT_DIR/traces/multipath"
+PATH1_DIR="$TRACE_ROOT/path_1/$PATH1_NAME"
+PATH2_DIR="$TRACE_ROOT/path_2/$PATH2_NAME"
+INFINITE_DOWN="$TRACE_ROOT/infinite.tr"
+
+LOG_TAG="${PATH1_NAME}__${PATH2_NAME}"
+LOG_DIR="$SCRIPT_DIR/logs/webrtc-trace/${LOG_TAG}"
 
 SERVER_ADDR_0="100.64.0.2:5001"
 SERVER_ADDR_1="100.64.0.4:5003"
-PION_SIGNAL_ADDR="100.64.0.2:8080"
+PION_SIGNAL_IP="100.64.0.2"
+PION_SIGNAL_PORT="8080"
+PION_SIGNAL_ADDR="${PION_SIGNAL_IP}:${PION_SIGNAL_PORT}"
 POLYCORN_CLIENT_LISTEN="127.0.0.1:9000"
 PION_DST_IP="127.0.0.2"
 PION_DST_PORT="5004"
 
-VIDEO_FILE="$PION_DIR/media/bbb_45s.h264"
+VIDEO_FILE="$PION_DIR/media/bbb_6mbps.h264"
 VIDEO_FPS="30"
 
 PID_LEOSHELL=""
@@ -25,7 +38,12 @@ PID_POLYCORN_CLIENT=""
 
 export PATH="$PATH:/usr/local/go/bin"
 
-# -- Resolve runtime library path -----------------------------------------------
+PATH1_UP="$PATH1_DIR/uplink.tr"
+PATH1_DELAY="$PATH1_DIR/delay.txt"
+PATH2_UP="$PATH2_DIR/uplink.tr"
+PATH2_DELAY="$PATH2_DIR/delay.txt"
+
+# Resolve runtime library path
 WRAPPER_SO=$(find "$SCRIPT_DIR/polycorn/target/release/build" \
     -path "*/quiche-rs-*/out/libquiche_wrapper.so" | sort | tail -n 1)
 
@@ -37,7 +55,7 @@ fi
 WRAPPER_DIR="$(dirname "$WRAPPER_SO")"
 LD_PATHS="$WRAPPER_DIR:$SCRIPT_DIR/polycorn/target/release:$SCRIPT_DIR/polycorn/target/release/deps${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-# -- Validate binaries -----------------------------------------------------------
+# Validate binaries
 if [ ! -x "$POLYCORN" ]; then
     echo "Error: polycorn driver not found or not executable: $POLYCORN"
     exit 1
@@ -48,19 +66,16 @@ if [ ! -x "$PION_DIR/pion_app" ]; then
     exit 1
 fi
 
-# -- Validate trace files --------------------------------------------------------
-if [ ! -f "$SCRIPT_DIR/traces/${TRACE_NAME}.up" ] || \
-   [ ! -f "$SCRIPT_DIR/traces/${TRACE_NAME}.down" ]; then
-    echo "Error: trace not found: traces/${TRACE_NAME}.{up,down}"
-    echo "Available traces:"
-    ls "$SCRIPT_DIR/traces/"*.up 2>/dev/null | sed 's/.*\///;s/\.up//'
-    exit 1
-fi
+# Validate trace files
+for f in "$PATH1_UP" "$PATH1_DELAY" "$PATH2_UP" "$PATH2_DELAY" "$INFINITE_DOWN"; do
+    if [ ! -f "$f" ]; then
+        echo "Error: required trace file not found: $f"
+        exit 1
+    fi
+done
 
 mkdir -p "$LOG_DIR"
-[ -f "$SCRIPT_DIR/traces/delay.txt" ] || echo "50" > "$SCRIPT_DIR/traces/delay.txt"
 
-# -- Runtime self-check ----------------------------------------------------------
 echo "Checking polycorn runtime library path..."
 echo "  WRAPPER_DIR=$WRAPPER_DIR"
 if ! LD_LIBRARY_PATH="$LD_PATHS" "$POLYCORN" --help >/dev/null 2>&1; then
@@ -69,7 +84,7 @@ if ! LD_LIBRARY_PATH="$LD_PATHS" "$POLYCORN" --help >/dev/null 2>&1; then
 fi
 echo "Runtime check passed"
 
-# -- Generate leoshell config ----------------------------------------------------
+# Generate leoshell config
 mkdir -p "$SCRIPT_DIR/config"
 cat > "$SCRIPT_DIR/config/trace_config.json" <<EOF
 {
@@ -77,10 +92,10 @@ cat > "$SCRIPT_DIR/config/trace_config.json" <<EOF
     "log_file": "${LOG_DIR}/leoshell.log",
     "if_configs": [
         {
-            "delay_interval": 5,
-            "delay_filename": "${SCRIPT_DIR}/traces/delay.txt",
-            "uplink": "${SCRIPT_DIR}/traces/${TRACE_NAME}.up",
-            "downlink": "${SCRIPT_DIR}/traces/${TRACE_NAME}.down",
+            "delay_interval": 10,
+            "delay_filename": "${PATH1_DELAY}",
+            "uplink": "${PATH1_UP}",
+            "downlink": "${INFINITE_DOWN}",
             "loss_rate": 0.00,
             "queue_params": {
                 "qdisc": {"type": "codel",    "packets": 500, "target": 5, "interval": 100},
@@ -88,10 +103,10 @@ cat > "$SCRIPT_DIR/config/trace_config.json" <<EOF
             }
         },
         {
-            "delay_interval": 5,
-            "delay_filename": "${SCRIPT_DIR}/traces/delay.txt",
-            "uplink": "${SCRIPT_DIR}/traces/${TRACE_NAME}.up",
-            "downlink": "${SCRIPT_DIR}/traces/${TRACE_NAME}.down",
+            "delay_interval": 10,
+            "delay_filename": "${PATH2_DELAY}",
+            "uplink": "${PATH2_UP}",
+            "downlink": "${INFINITE_DOWN}",
             "loss_rate": 0.00,
             "queue_params": {
                 "qdisc": {"type": "droptail", "packets": 500},
@@ -102,7 +117,6 @@ cat > "$SCRIPT_DIR/config/trace_config.json" <<EOF
 }
 EOF
 
-# -- Cleanup ---------------------------------------------------------------------
 cleanup() {
     echo ""
     echo "Cleaning up..."
@@ -118,16 +132,23 @@ cleanup() {
     sudo pkill -9 polycorn_driver 2>/dev/null || true
     pkill -f "pion_app" 2>/dev/null || true
 
+    # 删除媒体面重定向规则
     sudo iptables -t nat -D OUTPUT -p tcp \
         -d "$PION_DST_IP" --dport "$PION_DST_PORT" \
         -j REDIRECT --to-ports 9000 2>/dev/null || true
 
+    # 删除信令重定向规则，使用变量而非硬编码
+    sudo iptables -t nat -D OUTPUT -p tcp \
+        -d "$PION_SIGNAL_IP" --dport "$PION_SIGNAL_PORT" \
+        -j REDIRECT --to-ports 9000 2>/dev/null || true
+
     sudo ip addr del "${PION_DST_IP}/8" dev lo 2>/dev/null || true
     echo "Done."
+    sudo ip link delete egress0 2>/dev/null || true
+    sudo ip link delete egress1 2>/dev/null || true
 }
 trap cleanup EXIT
 
-# -- Network setup ---------------------------------------------------------------
 echo ""
 echo "Setting up network..."
 echo "----------------------------------------"
@@ -136,13 +157,28 @@ sudo ip addr add "${PION_DST_IP}/8" dev lo 2>/dev/null && \
     echo "Loopback alias $PION_DST_IP added" || \
     echo "Loopback alias $PION_DST_IP already exists, skipping"
 
+# 先删旧规则再添加，防止重复运行时规则堆叠
+sudo iptables -t nat -D OUTPUT -p tcp \
+    -d "$PION_DST_IP" --dport "$PION_DST_PORT" \
+    -j REDIRECT --to-ports 9000 2>/dev/null || true
+
 sudo iptables -t nat -A OUTPUT -p tcp \
     -d "$PION_DST_IP" --dport "$PION_DST_PORT" \
     -j REDIRECT --to-ports 9000 && \
-    echo "iptables redirect rule added" || \
-    { echo "Failed to add iptables rule"; exit 1; }
+    echo "iptables media redirect rule added" || \
+    { echo "Failed to add media iptables rule"; exit 1; }
 
-# -- Start leoshell (pion server + polycorn server inside) ----------------------
+# 信令规则也先删再加，使用变量
+sudo iptables -t nat -D OUTPUT -p tcp \
+    -d "$PION_SIGNAL_IP" --dport "$PION_SIGNAL_PORT" \
+    -j REDIRECT --to-ports 9000 2>/dev/null || true
+
+sudo iptables -t nat -A OUTPUT -p tcp \
+    -d "$PION_SIGNAL_IP" --dport "$PION_SIGNAL_PORT" \
+    -j REDIRECT --to-ports 9000 && \
+    echo "iptables signaling redirect rule added" || \
+    { echo "Failed to add signaling iptables rule"; exit 1; }
+
 echo ""
 echo "Starting leoshell..."
 echo "----------------------------------------"
@@ -152,6 +188,13 @@ leoshell "$SCRIPT_DIR/config/trace_config.json" /usr/bin/bash -lc "
     echo 'WRAPPER_DIR=$WRAPPER_DIR' >> '$LOG_DIR/runtime_env.log'
     echo 'LD_PATHS=$LD_PATHS' >> '$LOG_DIR/runtime_env.log'
     echo 'PION_SIGNAL_ADDR=$PION_SIGNAL_ADDR' >> '$LOG_DIR/runtime_env.log'
+    echo 'PATH1_NAME=$PATH1_NAME' >> '$LOG_DIR/runtime_env.log'
+    echo 'PATH2_NAME=$PATH2_NAME' >> '$LOG_DIR/runtime_env.log'
+    echo 'PATH1_UP=$PATH1_UP' >> '$LOG_DIR/runtime_env.log'
+    echo 'PATH1_DELAY=$PATH1_DELAY' >> '$LOG_DIR/runtime_env.log'
+    echo 'PATH2_UP=$PATH2_UP' >> '$LOG_DIR/runtime_env.log'
+    echo 'PATH2_DELAY=$PATH2_DELAY' >> '$LOG_DIR/runtime_env.log'
+    echo 'INFINITE_DOWN=$INFINITE_DOWN' >> '$LOG_DIR/runtime_env.log'
     echo '' >> '$LOG_DIR/runtime_env.log'
     echo '[ldd polycorn_driver]' >> '$LOG_DIR/runtime_env.log'
     env LD_LIBRARY_PATH='$LD_PATHS' ldd '$POLYCORN' >> '$LOG_DIR/runtime_env.log' 2>&1 || true
@@ -179,11 +222,10 @@ if ! kill -0 "$PID_LEOSHELL" 2>/dev/null; then
 fi
 echo "leoshell started (pid $PID_LEOSHELL)"
 
-# Wait for pion server signaling port
 echo -n "Waiting for pion server at $PION_SIGNAL_ADDR..."
 READY=0
 for i in $(seq 1 30); do
-    if nc -z "100.64.0.2" 8080 2>/dev/null; then
+    if grep -q "signaling HTTP on" "$LOG_DIR/pion_server.log" 2>/dev/null; then
         echo " ready (${i}s)"
         READY=1
         break
@@ -215,7 +257,6 @@ if [ "$READY" -ne 1 ]; then
     exit 1
 fi
 
-# -- Start polycorn client (outside leoshell) -----------------------------------
 echo ""
 echo "Starting polycorn client..."
 echo "----------------------------------------"
@@ -236,15 +277,17 @@ if ! sudo kill -0 "$PID_POLYCORN_CLIENT" 2>/dev/null; then
 fi
 echo "Polycorn client started (pid $PID_POLYCORN_CLIENT)"
 
-# -- Run pion client (foreground) -----------------------------------------------
 echo ""
-echo "Starting pion client (trace=$TRACE_NAME, duration=${DURATION}s)..."
+echo "Starting pion client (path1=$PATH1_NAME, path2=$PATH2_NAME, duration=${DURATION}s)..."
 echo "=================================================="
+
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
 
 LOG_DIR="$LOG_DIR" \
 SIGNAL_ADDR="$PION_SIGNAL_ADDR" \
 VIDEO_FILE="$VIDEO_FILE" \
 VIDEO_FPS="$VIDEO_FPS" \
+TEST_DURATION="$DURATION" \
 "$PION_DIR/pion_app" -role client
 
 CLIENT_EXIT=$?
@@ -253,7 +296,8 @@ echo ""
 echo "=================================================="
 if [ $CLIENT_EXIT -eq 0 ]; then
     echo "Test completed successfully"
-    echo "  Trace:    $TRACE_NAME"
+    echo "  Path 1:   $PATH1_NAME"
+    echo "  Path 2:   $PATH2_NAME"
     echo "  Duration: ${DURATION}s"
 else
     echo "Test failed (exit code $CLIENT_EXIT)"
@@ -268,3 +312,4 @@ echo "  polycorn server -> $LOG_DIR/polycorn_server.log"
 echo "  polycorn client -> $LOG_DIR/polycorn_client.log"
 echo "  results         -> $LOG_DIR/results.json"
 echo "  summary         -> $LOG_DIR/summary.txt"
+
