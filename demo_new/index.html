@@ -1,0 +1,1091 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Polycorn++ · Demo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg:        #060811;
+      --panel:     #0c1120;
+      --panel2:    #101828;
+      --border:    #1c2a42;
+      --border2:   #243350;
+      --cyan:      #00d9f5;
+      --cyan-dim:  #004f60;
+      --amber:     #f5a623;
+      --amber-dim: #5a3d0a;
+      --green:     #00e676;
+      --green-dim: #003d20;
+      --red:       #ff4757;
+      --red-dim:   #5c1520;
+      --text:      #b8ccee;
+      --muted:     #3d5070;
+      --white:     #e8f0ff;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'DM Sans', sans-serif;
+      min-height: 100vh;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        linear-gradient(rgba(0,217,245,0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,217,245,0.025) 1px, transparent 1px);
+      background-size: 48px 48px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 28px; height: 56px; border-bottom: 1px solid var(--border);
+      background: rgba(6,8,17,0.92); backdrop-filter: blur(12px);
+      position: sticky; top: 0; z-index: 200;
+    }
+
+    .logo { display: flex; align-items: center; gap: 14px; font-family: 'Space Mono', monospace; }
+    .logo-badge { display: flex; align-items: center; gap: 8px; font-size: 15px; color: var(--cyan); font-weight: 700; letter-spacing: 0.5px; }
+    .logo-sep { width: 1px; height: 20px; background: var(--border2); }
+    .logo-sub { font-size: 11px; color: var(--muted); letter-spacing: 0.5px; }
+
+    .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 0 rgba(0,230,118,0.4); animation: ripple 2s infinite; }
+    @keyframes ripple {
+      0%   { box-shadow: 0 0 0 0   rgba(0,230,118,0.4); }
+      70%  { box-shadow: 0 0 0 8px rgba(0,230,118,0); }
+      100% { box-shadow: 0 0 0 0   rgba(0,230,118,0); }
+    }
+
+    .controls { display: flex; align-items: center; gap: 12px; }
+    .label { font-family: 'Space Mono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--muted); }
+
+    select {
+      background: var(--panel2); border: 1px solid var(--border2); color: var(--cyan);
+      padding: 6px 10px; font-family: 'Space Mono', monospace; font-size: 12px;
+      border-radius: 4px; outline: none; cursor: pointer; appearance: none; -webkit-appearance: none; min-width: 200px;
+    }
+    select:hover { border-color: var(--cyan); }
+    select:focus { border-color: var(--cyan); box-shadow: 0 0 0 2px var(--cyan-dim); }
+
+    .btn { font-family: 'Space Mono', monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; padding: 7px 18px; border-radius: 4px; cursor: pointer; transition: all 0.15s; border: 1px solid; }
+    .btn-start { background: transparent; border-color: var(--cyan); color: var(--cyan); }
+    .btn-start:hover:not(:disabled) { background: var(--cyan); color: var(--bg); }
+    .btn-stop  { background: transparent; border-color: var(--muted); color: var(--muted); }
+    .btn-stop:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+    .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    /* ── Layout ── */
+    main { position: relative; z-index: 1; padding: 24px 28px 32px; max-width: 1560px; margin: 0 auto; }
+
+    /* ── Stats bar — 6 cards ── */
+    .stats-bar { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 20px; }
+
+    .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; display: flex; flex-direction: column; gap: 4px; }
+    .stat-card.loss-card { border-color: var(--border); transition: border-color 0.4s; }
+    .stat-card.loss-card.active { border-color: var(--red-dim); }
+
+    .stat-card-label { font-family: 'Space Mono', monospace; font-size: 9px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--muted); }
+    .stat-card-value { font-family: 'Space Mono', monospace; font-size: 26px; font-weight: 700; line-height: 1; color: var(--cyan); transition: color 0.3s; }
+    .stat-card-unit  { font-family: 'Space Mono', monospace; font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+    /* ── Video section ── */
+    .video-grid { display: grid; grid-template-columns: 1fr 64px 1fr; gap: 0; margin-bottom: 20px; align-items: start; }
+
+    .video-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; transition: border-color 0.2s; }
+    .video-card.freezing { border-color: var(--red) !important; box-shadow: 0 0 0 1px var(--red-dim); }
+
+    .video-card-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+    .card-title { font-family: 'Space Mono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 2px; display: flex; align-items: center; gap: 8px; }
+    .card-title.sender   { color: var(--green); }
+    .card-title.receiver { color: var(--amber); }
+    .dot-sender   { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+    .dot-receiver { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); animation: ripple-amber 2s infinite; }
+    @keyframes ripple-amber {
+      0%   { box-shadow: 0 0 0 0   rgba(245,166,35,0.4); }
+      70%  { box-shadow: 0 0 0 6px rgba(245,166,35,0); }
+      100% { box-shadow: 0 0 0 0   rgba(245,166,35,0); }
+    }
+
+    .card-badge { font-family: 'Space Mono', monospace; font-size: 9px; padding: 2px 8px; border-radius: 2px; letter-spacing: 0.5px; text-transform: uppercase; }
+    .badge-direct   { border: 1px solid var(--green-dim); color: var(--green); background: rgba(0,230,118,0.06); }
+    .badge-polycorn { border: 1px solid var(--amber-dim); color: var(--amber); background: rgba(245,166,35,0.06); }
+
+    .video-wrapper { position: relative; aspect-ratio: 16 / 9; background: #000; }
+    video { width: 100%; height: 100%; display: block; object-fit: cover; }
+
+    .video-overlay { position: absolute; inset: 0; background: rgba(6,8,17,0.88); display: flex; align-items: center; justify-content: center; transition: opacity 0.4s; }
+    .video-overlay.gone { opacity: 0; pointer-events: none; }
+    .overlay-inner { text-align: center; font-family: 'Space Mono', monospace; }
+    .overlay-title { font-size: 12px; color: var(--muted); letter-spacing: 2px; }
+
+    /* Freeze banner */
+    .freeze-banner {
+      position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+      background: rgba(255,71,87,0.08); border: 2px solid var(--red); pointer-events: none;
+      opacity: 0; transition: opacity 0.08s; z-index: 10;
+    }
+    .freeze-banner.active { opacity: 1; animation: freeze-flash 0.25s ease-out; }
+    @keyframes freeze-flash {
+      0%   { background: rgba(255,71,87,0.35); }
+      100% { background: rgba(255,71,87,0.08); }
+    }
+    .freeze-label { font-family: 'Space Mono', monospace; font-size: 13px; font-weight: 700; color: var(--red); letter-spacing: 2px; text-transform: uppercase; background: rgba(6,8,17,0.75); padding: 5px 14px; border-radius: 3px; border: 1px solid var(--red-dim); }
+    .freeze-count { font-family: 'Space Mono', monospace; font-size: 10px; color: rgba(255,71,87,0.7); letter-spacing: 1px; }
+
+    .video-timecode { position: absolute; bottom: 8px; left: 10px; font-family: 'Space Mono', monospace; font-size: 11px; background: rgba(0,0,0,0.65); padding: 2px 6px; border-radius: 2px; pointer-events: none; }
+    .timecode-sender   { color: var(--green); }
+    .timecode-receiver { color: var(--amber); }
+
+    .video-footer { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; }
+    .vf-item { padding: 8px 12px; border-right: 1px solid var(--border); text-align: center; }
+    .vf-item:last-child { border-right: none; }
+    .vf-label { font-family: 'Space Mono', monospace; font-size: 9px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); display: block; margin-bottom: 2px; }
+    .vf-value { font-family: 'Space Mono', monospace; font-size: 13px; font-weight: 700; }
+
+    /* Connector */
+    .connector { display: flex; flex-direction: column; align-items: center; justify-content: center; padding-top: 44px; gap: 6px; height: 100%; }
+    .conn-line { width: 2px; flex: 1; background: linear-gradient(to bottom, transparent, var(--cyan-dim), var(--cyan), var(--amber-dim), transparent); max-height: 120px; border-radius: 1px; }
+    .conn-latency { font-family: 'Space Mono', monospace; font-size: 11px; color: var(--cyan); writing-mode: vertical-rl; text-orientation: mixed; letter-spacing: 1px; background: var(--bg); padding: 4px 2px; white-space: nowrap; }
+
+    /* ── Bottom section: chart (2/3) + satellite viz (1/3) ── */
+    .bottom-section {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    /* Shared card style for both panels */
+    .chart-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 20px 12px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-shrink: 0; }
+    .chart-title { font-family: 'Space Mono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 2px; color: var(--cyan); }
+    .chart-legend { display: flex; gap: 16px; }
+    .legend-item { display: flex; align-items: center; gap: 5px; font-family: 'Space Mono', monospace; font-size: 10px; color: var(--muted); }
+    .legend-swatch { width: 16px; height: 3px; border-radius: 2px; }
+
+    /* Chart canvas fills remaining vertical space */
+    #chartCanvas {
+      display: block;
+      width: 100% !important;
+      flex: 1;
+      min-height: 140px;
+      max-height: 180px;
+    }
+
+    /* Satellite canvas fills the whole right card */
+    #satCanvas {
+      display: block;
+      width: 100% !important;
+      flex: 1;
+      min-height: 200px;
+    }
+
+    /* Sat card: signal disruption state */
+    .sat-card { transition: border-color 0.3s; }
+    .sat-card.disrupted { border-color: rgba(255,71,87,0.5); }
+
+    /* Sat panel header extras */
+    .sat-status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-family: 'Space Mono', monospace;
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .sat-count { color: var(--muted); }
+    .sat-signal {
+      padding: 2px 8px;
+      border-radius: 2px;
+      color: var(--green);
+      border: 1px solid var(--green-dim);
+      background: rgba(0,230,118,0.06);
+      transition: all 0.3s;
+    }
+    .sat-signal.warn { color: var(--amber); border-color: var(--amber-dim); background: rgba(245,166,35,0.06); }
+    .sat-signal.lost { color: var(--red);   border-color: var(--red-dim);   background: rgba(255,71,87,0.06);
+                       animation: blink-red 0.6s step-start infinite; }
+    @keyframes blink-red {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    /* Colour helpers */
+    .c-cyan  { color: var(--cyan); }
+    .c-green { color: var(--green); }
+    .c-amber { color: var(--amber); }
+    .c-red   { color: var(--red); }
+    .c-muted { color: var(--muted); }
+
+    /* Responsive */
+    @media (max-width: 1200px) {
+      .stats-bar { grid-template-columns: repeat(3, 1fr); }
+      .bottom-section { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 1024px) {
+      .stats-bar { grid-template-columns: repeat(3, 1fr); }
+      .video-grid { grid-template-columns: 1fr; }
+      .connector { display: none; }
+      .bottom-section { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-badge">
+      <div class="pulse" id="statusPulse"></div>
+      POLYCORN++
+    </div>
+    <div class="logo-sep"></div>
+    <span class="logo-sub">WebRTC · Demo</span>
+  </div>
+  <div class="controls">
+    <span class="label">Video</span>
+    <select id="videoSelect" onchange="onVideoChange()"><option value="">— Loading —</option></select>
+    <span class="label" style="margin-left:4px">Trace</span>
+    <select id="traceSelect"><option value="">— Select video first —</option></select>
+    <button class="btn btn-start" id="btnStart" onclick="startDemo()">▶ Start</button>
+    <button class="btn btn-stop"  id="btnStop"  onclick="stopDemo()"  disabled>■ Stop</button>
+  </div>
+</header>
+
+<main>
+
+  <!-- Stats bar -->
+  <div class="stats-bar">
+    <div class="stat-card">
+      <span class="stat-card-label">Current Latency</span>
+      <span class="stat-card-value" id="sLatency">—</span>
+      <span class="stat-card-unit">ms</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-card-label">Rolling Avg</span>
+      <span class="stat-card-value" id="sAvg">—</span>
+      <span class="stat-card-unit">ms</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-card-label">Throughput</span>
+      <span class="stat-card-value" id="sThroughput" style="color:var(--green)">—</span>
+      <span class="stat-card-unit">Mbps</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-card-label">Frames Sent</span>
+      <span class="stat-card-value" id="sFrames" style="color:var(--text)">0</span>
+      <span class="stat-card-unit">frames</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-card-label">P99 Latency</span>
+      <span class="stat-card-value" id="sP99">—</span>
+      <span class="stat-card-unit">ms</span>
+    </div>
+    <div class="stat-card loss-card" id="lossCard">
+      <span class="stat-card-label">Frame Loss</span>
+      <span class="stat-card-value c-muted" id="sLossRate">0.0%</span>
+      <span class="stat-card-unit" id="sLostCount">— frames lost</span>
+    </div>
+  </div>
+
+  <!-- Videos -->
+  <div class="video-grid">
+    <div class="video-card">
+      <div class="video-card-header">
+        <span class="card-title sender"><span class="dot-sender"></span>Sender — Source Feed</span>
+        <span class="card-badge badge-direct">Direct</span>
+      </div>
+      <div class="video-wrapper">
+        <video id="leftVideo" muted playsinline loop></video>
+        <div class="video-overlay" id="leftOverlay"><div class="overlay-inner"><div class="overlay-title">Awaiting Start</div></div></div>
+        <div class="video-timecode timecode-sender" id="leftTC" style="display:none">00:00.000</div>
+      </div>
+      <div class="video-footer">
+        <div class="vf-item"><span class="vf-label">Frame</span><span class="vf-value c-green" id="leftFrame">—</span></div>
+        <div class="vf-item"><span class="vf-label">FPS</span><span class="vf-value c-green">30</span></div>
+        <div class="vf-item"><span class="vf-label">Codec</span><span class="vf-value c-green" style="font-size:11px">H.264</span></div>
+        <div class="vf-item"><span class="vf-label">Delay</span><span class="vf-value c-green">0 ms</span></div>
+      </div>
+    </div>
+
+    <div class="connector">
+      <div class="conn-line"></div>
+      <div class="conn-latency" id="connLabel"></div>
+      <div class="conn-line"></div>
+    </div>
+
+    <div class="video-card" id="rightCard">
+      <div class="video-card-header">
+        <span class="card-title receiver"><span class="dot-receiver"></span>Receiver — Via Polycorn</span>
+        <span class="card-badge badge-polycorn">Multipath</span>
+      </div>
+      <div class="video-wrapper">
+        <video id="rightVideo" muted playsinline loop></video>
+        <div class="video-overlay" id="rightOverlay"><div class="overlay-inner"><div class="overlay-title">Waiting for Stream</div></div></div>
+        <div class="video-timecode timecode-receiver" id="rightTC" style="display:none">00:00.000</div>
+        <div class="freeze-banner" id="freezeBanner">
+          <div class="freeze-label">⚠ Frame Lost</div>
+          <div class="freeze-count" id="freezeCountLabel"></div>
+        </div>
+      </div>
+      <div class="video-footer">
+        <div class="vf-item"><span class="vf-label">Frame</span><span class="vf-value c-amber" id="rightFrame">—</span></div>
+        <div class="vf-item"><span class="vf-label">Lag</span><span class="vf-value c-amber" id="rightLag">— ms</span></div>
+        <div class="vf-item"><span class="vf-label">Buffer</span><span class="vf-value c-amber" id="rightBuf">— s</span></div>
+        <div class="vf-item"><span class="vf-label">Lost</span><span class="vf-value c-muted" id="rightLost">0</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom: chart (2/3) + satellite viz (1/3) -->
+  <div class="bottom-section">
+
+    <!-- Latency chart -->
+    <div class="chart-card">
+      <div class="chart-header">
+        <span class="chart-title">Frame Latency Timeline</span>
+        <div class="chart-legend">
+          <div class="legend-item"><div class="legend-swatch" style="background:var(--amber)"></div>Per-frame</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:var(--cyan)"></div>Rolling avg</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:var(--muted);border-top:1px dashed var(--muted)"></div>Trace avg</div>
+          <div class="legend-item"><div class="legend-swatch" style="background:var(--red);opacity:0.5"></div>Frame loss</div>
+        </div>
+      </div>
+      <canvas id="chartCanvas"></canvas>
+    </div>
+
+    <!-- Satellite constellation -->
+    <div class="chart-card sat-card" id="satCard">
+      <div class="chart-header">
+        <span class="chart-title">LEO Constellation</span>
+        <div class="sat-status">
+          <span class="sat-count" id="satCount">— sats</span>
+          <span class="sat-signal" id="satSignal">LINK OK</span>
+        </div>
+      </div>
+      <canvas id="satCanvas"></canvas>
+    </div>
+
+  </div>
+
+</main>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+//  App state
+// ═══════════════════════════════════════════════════════════════════
+let ws            = null;
+let isRunning     = false;
+let syncRAF       = null;
+let currentLatMs  = 0;
+let traceAvgMs    = 0;
+let frameCount    = 0;
+const CHART_MAX   = 200;
+const latHistory  = [];
+
+let freezeUntilWallMs = 0;
+let totalLostFrames   = 0;
+let currentLossRate   = 0;
+const lossMarkers     = [];
+
+const leftVideo  = document.getElementById('leftVideo');
+const rightVideo = document.getElementById('rightVideo');
+
+// ═══════════════════════════════════════════════════════════════════
+//  Load media / traces
+// ═══════════════════════════════════════════════════════════════════
+async function loadMediaList() {
+  const sel = document.getElementById('videoSelect');
+  try {
+    const res = await fetch('/api/media');
+    const names = await res.json();
+    sel.innerHTML = '';
+    if (!names || names.length === 0) { sel.innerHTML = '<option value="">No .h264 files found</option>'; return; }
+    names.forEach(n => {
+      const opt = document.createElement('option');
+      opt.value = n; opt.textContent = n + '.h264';
+      sel.appendChild(opt);
+    });
+    await onVideoChange();
+  } catch (e) {
+    sel.innerHTML = '<option value="bbb_2mbps">bbb_2mbps.h264</option>';
+    console.warn('Could not load media list:', e);
+    await onVideoChange();
+  }
+}
+
+async function onVideoChange() {
+  const video = document.getElementById('videoSelect').value;
+  const sel   = document.getElementById('traceSelect');
+  sel.innerHTML = '<option value="">— Loading —</option>';
+  if (!video) return;
+  try {
+    const res    = await fetch('/api/traces?video=' + encodeURIComponent(video));
+    const traces = await res.json();
+    sel.innerHTML = '';
+    if (!traces || traces.length === 0) { sel.innerHTML = '<option value="">No logs for this video yet</option>'; return; }
+    traces.forEach(t => {
+      const opt = document.createElement('option');
+      opt.value = t.trace;
+      const avgS = t.avg_latency_ms >= 1000 ? (t.avg_latency_ms/1000).toFixed(1)+'s' : Math.round(t.avg_latency_ms)+'ms';
+      const lossStr = t.frame_loss_rate > 0 ? ` · loss ${(t.frame_loss_rate*100).toFixed(1)}%` : '';
+      opt.textContent = `${t.trace}  [avg ${avgS} · ${t.throughput_mbps.toFixed(2)} Mbps${lossStr}]`;
+      sel.appendChild(opt);
+    });
+  } catch (e) {
+    sel.innerHTML = '<option value="">Error loading traces</option>';
+    console.warn('Could not load traces:', e);
+  }
+}
+
+let traceData = {};
+async function fetchTraceInfo(video, trace) {
+  try {
+    const res    = await fetch('/api/traces?video=' + encodeURIComponent(video));
+    const traces = await res.json();
+    return traces.find(t => t.trace === trace) || {};
+  } catch { return {}; }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Demo control
+// ═══════════════════════════════════════════════════════════════════
+async function startDemo() {
+  const videoName = document.getElementById('videoSelect').value;
+  const traceName = document.getElementById('traceSelect').value;
+  if (!videoName) { alert('Please select a video file.'); return; }
+  if (!traceName) { alert('Please select a network trace.'); return; }
+
+  traceData = await fetchTraceInfo(videoName, traceName);
+  traceAvgMs = traceData.avg_latency_ms || 1700;
+  currentLatMs = 0; frameCount = 0; totalLostFrames = 0; currentLossRate = 0;
+  freezeUntilWallMs = 0; lossMarkers.length = 0; latHistory.length = 0;
+
+  if (traceData.p99_ms) {
+    const p99El = document.getElementById('sP99');
+    p99El.textContent = Math.round(traceData.p99_ms);
+    p99El.className = 'stat-card-value ' + latClass(traceData.p99_ms);
+  }
+  if (traceData.throughput_mbps) {
+    document.getElementById('sThroughput').textContent = traceData.throughput_mbps.toFixed(2);
+  }
+
+  updateLossDisplay();
+  isRunning = true;
+  document.getElementById('btnStart').disabled = true;
+  document.getElementById('btnStop').disabled  = false;
+  document.getElementById('videoSelect').disabled = true;
+  document.getElementById('traceSelect').disabled = true;
+  document.getElementById('statusPulse').style.background = 'var(--cyan)';
+  document.getElementById('connLabel').textContent = traceName.replace(/-/g,' ').toUpperCase();
+
+  const videoURL = '/video?name=' + encodeURIComponent(videoName);
+  leftVideo.src = videoURL; rightVideo.src = videoURL;
+  await Promise.all([leftVideo.load(), rightVideo.load()]);
+
+  leftVideo.currentTime = 0;
+  leftVideo.play().catch(console.warn);
+  showOverlay('leftOverlay', false);
+  document.getElementById('leftTC').style.display = '';
+
+  showOverlay('rightOverlay', false);
+  document.getElementById('rightTC').style.display = '';
+  rightVideo.currentTime = 0; rightVideo.pause();
+  showFreezeBanner(false);
+
+  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${wsProto}://${location.host}/ws?video=${encodeURIComponent(videoName)}&trace=${encodeURIComponent(traceName)}`);
+  ws.onmessage = onWsMessage;
+  ws.onerror   = (e) => console.error('WS error', e);
+  ws.onclose   = () => { if (isRunning) stopDemo(); };
+
+  syncVideos();
+}
+
+function stopDemo() {
+  isRunning = false;
+  if (ws) { ws.close(); ws = null; }
+  leftVideo.pause(); rightVideo.pause();
+  if (syncRAF) cancelAnimationFrame(syncRAF);
+  freezeUntilWallMs = 0;
+  showFreezeBanner(false);
+  document.getElementById('rightCard').classList.remove('freezing');
+  document.getElementById('satCard').classList.remove('disrupted');
+  document.getElementById('satSignal').className = 'sat-signal';
+  document.getElementById('satSignal').textContent = 'LINK OK';
+
+  document.getElementById('btnStart').disabled = false;
+  document.getElementById('btnStop').disabled  = true;
+  document.getElementById('videoSelect').disabled = false;
+  document.getElementById('traceSelect').disabled = false;
+  document.getElementById('statusPulse').style.background = 'var(--green)';
+  showOverlay('leftOverlay', true); showOverlay('rightOverlay', true);
+  document.getElementById('leftTC').style.display  = 'none';
+  document.getElementById('rightTC').style.display = 'none';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  WebSocket handler
+// ═══════════════════════════════════════════════════════════════════
+function onWsMessage(evt) {
+  const d = JSON.parse(evt.data);
+  if (d.frame === 0) { stopDemo(); return; }
+  frameCount = d.frame;
+
+  if (d.freeze) {
+    const durationMs = (d.freeze_frames || 1) / 30 * 1000;
+    freezeUntilWallMs = Date.now() + durationMs;
+    totalLostFrames += d.freeze_frames || 1;
+    currentLossRate  = d.loss_rate || 0;
+    lossMarkers.push({ frameIdx: frameCount, count: d.freeze_frames || 1 });
+    updateLossDisplay();
+    latHistory.push({ lat: currentLatMs, avg: currentLatMs, freeze: true });
+    if (latHistory.length > CHART_MAX) latHistory.shift();
+    return;
+  }
+
+  currentLatMs    = d.latency_ms;
+  currentLossRate = d.loss_rate || 0;
+  setLatency('sLatency', d.latency_ms);
+  setLatency('sAvg',     d.avg_ms);
+  document.getElementById('sFrames').textContent = d.frame;
+
+  latHistory.push({ lat: d.latency_ms, avg: d.avg_ms, freeze: false });
+  if (latHistory.length > CHART_MAX) latHistory.shift();
+  updateLossDisplay();
+}
+
+function updateLossDisplay() {
+  const rateEl      = document.getElementById('sLossRate');
+  const cntEl       = document.getElementById('sLostCount');
+  const cardEl      = document.getElementById('lossCard');
+  const rightLostEl = document.getElementById('rightLost');
+
+  rateEl.textContent = (currentLossRate * 100).toFixed(1) + '%';
+  cntEl.textContent  = totalLostFrames + ' frame' + (totalLostFrames !== 1 ? 's' : '') + ' lost';
+  rightLostEl.textContent = totalLostFrames;
+
+  if (totalLostFrames > 0) {
+    rateEl.className = 'stat-card-value ' + (currentLossRate > 0.05 ? 'c-red' : 'c-amber');
+    rightLostEl.className = 'vf-value ' + (currentLossRate > 0.05 ? 'c-red' : 'c-amber');
+    cardEl.classList.add('active');
+  } else {
+    rateEl.className = 'stat-card-value c-muted';
+    rightLostEl.className = 'vf-value c-muted';
+    cardEl.classList.remove('active');
+  }
+}
+
+function showFreezeBanner(show) {
+  const banner = document.getElementById('freezeBanner');
+  if (show) banner.classList.add('active');
+  else      banner.classList.remove('active');
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Video sync loop
+// ═══════════════════════════════════════════════════════════════════
+function syncVideos() {
+  if (!isRunning) return;
+
+  const now      = Date.now();
+  const isFrozen = now < freezeUntilWallMs;
+  const lTime    = leftVideo.currentTime;
+
+  document.getElementById('leftFrame').textContent  = Math.round(lTime * 30);
+  document.getElementById('leftTC').textContent     = fmtTime(lTime);
+  document.getElementById('rightTC').textContent    = fmtTime(rightVideo.currentTime);
+  document.getElementById('rightFrame').textContent = Math.round(rightVideo.currentTime * 30);
+
+  if (isFrozen) {
+    if (!rightVideo.paused) rightVideo.pause();
+    showFreezeBanner(true);
+    document.getElementById('rightCard').classList.add('freezing');
+    document.getElementById('rightLag').textContent = '⚠ frozen';
+    document.getElementById('rightBuf').textContent = '—';
+    // Satellite panel disruption
+    document.getElementById('satCard').classList.add('disrupted');
+    const sigEl = document.getElementById('satSignal');
+    sigEl.className = 'sat-signal lost';
+    sigEl.textContent = 'DISRUPTED';
+  } else {
+    showFreezeBanner(false);
+    document.getElementById('rightCard').classList.remove('freezing');
+    document.getElementById('satCard').classList.remove('disrupted');
+    const sigEl = document.getElementById('satSignal');
+    if (currentLatMs > 3000)     { sigEl.className = 'sat-signal warn'; sigEl.textContent = 'HIGH LAT'; }
+    else if (currentLatMs > 800) { sigEl.className = 'sat-signal warn'; sigEl.textContent = 'ELEVATED'; }
+    else                         { sigEl.className = 'sat-signal';      sigEl.textContent = 'LINK OK'; }
+
+    const targetLag   = currentLatMs / 1000;
+    const targetRight = Math.max(0, lTime - targetLag);
+    const actualLag   = (lTime - rightVideo.currentTime) * 1000;
+
+    document.getElementById('rightLag').textContent = Math.round(actualLag) + ' ms';
+    document.getElementById('rightBuf').textContent = targetLag.toFixed(2) + ' s';
+
+    if (rightVideo.paused) {
+      if (lTime >= targetLag) {
+        if (Math.abs(rightVideo.currentTime - targetRight) > 0.08) rightVideo.currentTime = targetRight;
+        rightVideo.play().catch(() => {});
+      }
+    } else {
+      const diff = rightVideo.currentTime - targetRight;
+      if (diff > 0.15)  rightVideo.pause();
+      else if (diff < -0.4) rightVideo.currentTime = targetRight;
+    }
+  }
+
+  syncRAF = requestAnimationFrame(syncVideos);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Latency chart
+// ═══════════════════════════════════════════════════════════════════
+const chartCanvas = document.getElementById('chartCanvas');
+const ctx         = chartCanvas.getContext('2d');
+
+function drawChart(ts) {
+  const dpr  = window.devicePixelRatio || 1;
+  const rect = chartCanvas.getBoundingClientRect();
+  chartCanvas.width  = rect.width  * dpr;
+  chartCanvas.height = rect.height * dpr;
+  ctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+
+  ctx.clearRect(0, 0, W, H);
+
+  if (latHistory.length < 2) { requestAnimationFrame(drawChart); return; }
+
+  const maxLat  = Math.max(...latHistory.map(d => d.lat));
+  const yMax    = Math.max(maxLat * 1.2, traceAvgMs * 1.4, 500);
+  const PAD_L = 56, PAD_B = 28, PAD_T = 10, PAD_R = 16;
+  const cW = W - PAD_L - PAD_R, cH = H - PAD_B - PAD_T;
+
+  const xOf = i => PAD_L + (i / (CHART_MAX - 1)) * cW;
+  const yOf = v => PAD_T + cH * (1 - v / yMax);
+
+  ctx.strokeStyle = 'rgba(28,42,66,0.8)'; ctx.lineWidth = 1;
+  [0, 0.25, 0.5, 0.75, 1.0].forEach(f => {
+    const y = PAD_T + cH * (1 - f);
+    ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
+    ctx.fillStyle = 'rgba(61,80,112,0.7)';
+    ctx.font = '9px "Space Mono", monospace'; ctx.textAlign = 'right';
+    ctx.fillText(fmtMs(yMax * f), PAD_L - 4, y + 3);
+  });
+
+  if (traceAvgMs > 0) {
+    const yA = yOf(traceAvgMs);
+    ctx.strokeStyle = 'rgba(61,80,112,0.6)'; ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(PAD_L, yA); ctx.lineTo(W - PAD_R, yA); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  const n = latHistory.length, startIdx = Math.max(0, CHART_MAX - n);
+
+  latHistory.forEach((d, i) => {
+    if (!d.freeze) return;
+    const x = xOf(startIdx + i);
+    ctx.fillStyle = 'rgba(255,71,87,0.22)';
+    ctx.fillRect(x - 3, PAD_T, 6, cH);
+    ctx.strokeStyle = 'rgba(255,71,87,0.7)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x, PAD_T); ctx.lineTo(x, PAD_T + 14); ctx.stroke();
+  });
+
+  ctx.beginPath();
+  latHistory.forEach((d, i) => { const x = xOf(startIdx+i), y = yOf(d.lat); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
+  ctx.lineTo(xOf(startIdx+n-1), PAD_T+cH); ctx.lineTo(xOf(startIdx), PAD_T+cH); ctx.closePath();
+  const grad = ctx.createLinearGradient(0, PAD_T, 0, PAD_T+cH);
+  grad.addColorStop(0, 'rgba(245,166,35,0.25)'); grad.addColorStop(1, 'rgba(245,166,35,0.00)');
+  ctx.fillStyle = grad; ctx.fill();
+
+  ctx.beginPath();
+  latHistory.forEach((d, i) => { const x = xOf(startIdx+i), y = yOf(d.lat); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
+  ctx.strokeStyle = 'rgba(245,166,35,0.8)'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  ctx.beginPath();
+  latHistory.forEach((d, i) => { const x = xOf(startIdx+i), y = yOf(d.avg); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
+  ctx.strokeStyle = 'rgba(0,217,245,0.9)'; ctx.lineWidth = 2; ctx.stroke();
+
+  ctx.fillStyle = 'rgba(61,80,112,0.7)'; ctx.font = '9px "Space Mono", monospace'; ctx.textAlign = 'left';
+  ctx.fillText(`FRAME  ${Math.max(1, frameCount-n+1)} → ${frameCount}`, PAD_L, H - 6);
+
+  requestAnimationFrame(drawChart);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Satellite Constellation Animation
+// ═══════════════════════════════════════════════════════════════════
+const satCanvas = document.getElementById('satCanvas');
+const sctx      = satCanvas.getContext('2d');
+
+const DEG = Math.PI / 180;
+
+// Three Starlink-inspired shells: {r in world-units, incl rad, planes, satsPerPlane, speed rad/ms}
+// Earth surface = r=0.40 world-units; scale factor maps to pixels.
+const SHELLS = [
+  { r: 0.56, incl: 53*DEG, planes: 5, satsPerPlane: 8,  speed: 0.00028, col: '#00d9f5' }, // 53° - dense
+  { r: 0.64, incl: 70*DEG, planes: 4, satsPerPlane: 6,  speed: 0.00022, col: '#00b8d4' }, // 70° - mid
+  { r: 0.73, incl: 97*DEG, planes: 3, satsPerPlane: 5,  speed: 0.00017, col: '#0096b3' }, // polar
+];
+
+// Pre-generate satellite objects
+const sats = [];
+SHELLS.forEach((sh, si) => {
+  for (let pi = 0; pi < sh.planes; pi++) {
+    const Omega = (2 * Math.PI * pi) / sh.planes;
+    for (let sj = 0; sj < sh.satsPerPlane; sj++) {
+      // Stagger satellites within each plane + add phase between planes
+      const alpha0 = (2 * Math.PI * sj) / sh.satsPerPlane + (pi * 0.37);
+      sats.push({ si, r: sh.r, incl: sh.incl, Omega, alpha: alpha0, speed: sh.speed, col: sh.col });
+    }
+  }
+});
+
+// Stars
+const STARS = Array.from({ length: 140 }, () => ({
+  x: Math.random(), y: Math.random(),
+  r: Math.random() * 1.3 + 0.2,
+  base: Math.random() * 0.5 + 0.25,
+  phase: Math.random() * Math.PI * 2,
+  freq:  Math.random() * 0.0018 + 0.0006,
+}));
+
+// Ground stations (lat, lon in radians)
+const GROUND = [
+  { lat: 37*DEG,  lon: -122*DEG }, // San Francisco
+  { lat: 51*DEG,  lon:    0*DEG }, // London
+  { lat: 35*DEG,  lon:  139*DEG }, // Tokyo
+];
+
+let camY      = Math.PI / 5;  // initial globe tilt
+let satTime   = 0;            // accumulated time (ms)
+let lastSatTs = performance.now();
+let satPulse  = 0;            // 0..1 signal animation phase
+
+// 3D orbital position (world-units)
+function orbitPos(r, incl, Omega, alpha) {
+  const x0 = r * Math.cos(alpha), z0 = r * Math.sin(alpha);
+  // Incline around X axis
+  const y1 =  z0 * Math.sin(incl);
+  const z1 =  z0 * Math.cos(incl);
+  // Ascending node rotation around Z axis
+  const cO = Math.cos(Omega), sO = Math.sin(Omega);
+  return {
+    x: x0 * cO - y1 * sO,
+    y: x0 * sO + y1 * cO,
+    z: z1,
+  };
+}
+
+// Camera projection: rotate world around Y axis, then orthographic
+function project(p3, cy, cx, screenY, sc) {
+  const cosC = Math.cos(cy), sinC = Math.sin(cy);
+  const px =  p3.x * cosC + p3.z * sinC;
+  const py =  p3.y;
+  const pz = -p3.x * sinC + p3.z * cosC;
+  return { sx: cx + px * sc, sy: screenY - py * sc, sz: pz };
+}
+
+// Geographic → 3D (surface point)
+function geoTo3D(lat, lon, r) {
+  return {
+    x: r * Math.cos(lat) * Math.sin(lon),
+    y: r * Math.sin(lat),
+    z: r * Math.cos(lat) * Math.cos(lon),
+  };
+}
+
+function drawSatViz(ts) {
+  const dt = ts - lastSatTs;
+  lastSatTs = ts;
+  satTime += dt;
+  satPulse  = (satPulse + dt * 0.0007) % 1;
+  camY     += dt * 0.00014;  // slow globe spin
+
+  const dpr  = window.devicePixelRatio || 1;
+  const rect = satCanvas.getBoundingClientRect();
+  if (rect.width < 4 || rect.height < 4) { requestAnimationFrame(drawSatViz); return; }
+
+  satCanvas.width  = rect.width  * dpr;
+  satCanvas.height = rect.height * dpr;
+  sctx.scale(dpr, dpr);
+  const W = rect.width, H = rect.height;
+  const cx = W / 2, cy = H / 2;
+
+  // Globe scale: Earth radius = 0.40 world-units → earthR pixels
+  const earthR = Math.min(W, H) * 0.30;
+  const sc     = earthR / 0.40;
+
+  // ── Deep space background ──
+  sctx.clearRect(0, 0, W, H);
+  const bgG = sctx.createRadialGradient(cx, cy * 0.8, 0, cx, cy, Math.max(W, H) * 0.75);
+  bgG.addColorStop(0,   '#0a1628');
+  bgG.addColorStop(0.6, '#060d1c');
+  bgG.addColorStop(1,   '#03080f');
+  sctx.fillStyle = bgG; sctx.fillRect(0, 0, W, H);
+
+  // ── Stars ──
+  STARS.forEach(s => {
+    const a = s.base * (0.55 + 0.45 * Math.sin(s.phase + satTime * s.freq));
+    sctx.beginPath();
+    sctx.arc(s.x * W, s.y * H, s.r, 0, Math.PI * 2);
+    sctx.fillStyle = `rgba(200,220,255,${a.toFixed(2)})`;
+    sctx.fill();
+  });
+
+  // ── Atmosphere glow ──
+  const atmG = sctx.createRadialGradient(cx, cy, earthR * 0.88, cx, cy, earthR * 1.4);
+  atmG.addColorStop(0,   'rgba(0,120,180,0.00)');
+  atmG.addColorStop(0.4, 'rgba(0,160,220,0.14)');
+  atmG.addColorStop(0.8, 'rgba(0,100,160,0.05)');
+  atmG.addColorStop(1,   'rgba(0,60,120,0.00)');
+  sctx.beginPath(); sctx.arc(cx, cy, earthR * 1.4, 0, Math.PI * 2);
+  sctx.fillStyle = atmG; sctx.fill();
+
+  // ── Earth body ──
+  const earthG = sctx.createRadialGradient(cx - earthR * 0.22, cy - earthR * 0.18, earthR * 0.05, cx, cy, earthR);
+  earthG.addColorStop(0.0, '#1e5490');
+  earthG.addColorStop(0.3, '#0e3460');
+  earthG.addColorStop(0.7, '#081f40');
+  earthG.addColorStop(1.0, '#030d20');
+  sctx.beginPath(); sctx.arc(cx, cy, earthR, 0, Math.PI * 2);
+  sctx.fillStyle = earthG; sctx.fill();
+
+  // Grid lines clipped to Earth disk
+  sctx.save();
+  sctx.beginPath(); sctx.arc(cx, cy, earthR - 0.5, 0, Math.PI * 2); sctx.clip();
+  sctx.strokeStyle = 'rgba(0,160,220,0.10)'; sctx.lineWidth = 0.6;
+  // Latitude parallels
+  for (let lat = -60; lat <= 60; lat += 30) {
+    const yr  = Math.sin(lat * DEG) * earthR;
+    const xr  = Math.sqrt(Math.max(0, earthR * earthR - yr * yr));
+    sctx.beginPath(); sctx.ellipse(cx, cy + yr, xr, xr * 0.18, 0, 0, Math.PI * 2);
+    sctx.stroke();
+  }
+  // Meridians (rotate with globe)
+  for (let i = 0; i < 6; i++) {
+    const ang = (i / 6) * Math.PI + camY * 0.5;
+    const xm  = Math.abs(Math.cos(ang)) * earthR;
+    sctx.beginPath(); sctx.ellipse(cx, cy, xm, earthR, 0, 0, Math.PI * 2);
+    sctx.stroke();
+  }
+  sctx.restore();
+
+  // Earth specular highlight
+  const hlG = sctx.createRadialGradient(cx - earthR * 0.28, cy - earthR * 0.28, 0, cx, cy, earthR);
+  hlG.addColorStop(0,   'rgba(100,180,240,0.20)');
+  hlG.addColorStop(0.4, 'rgba(40,120,200,0.06)');
+  hlG.addColorStop(1,   'rgba(0,0,0,0)');
+  sctx.beginPath(); sctx.arc(cx, cy, earthR, 0, Math.PI * 2);
+  sctx.fillStyle = hlG; sctx.fill();
+
+  // Earth rim
+  sctx.beginPath(); sctx.arc(cx, cy, earthR, 0, Math.PI * 2);
+  sctx.strokeStyle = 'rgba(0,190,240,0.35)'; sctx.lineWidth = 1; sctx.stroke();
+
+  // ── Orbital ring traces ──
+  SHELLS.forEach((sh, si) => {
+    for (let pi = 0; pi < sh.planes; pi++) {
+      const Omega = (2 * Math.PI * pi) / sh.planes;
+      const pts   = [];
+      for (let t = 0; t <= 64; t++) {
+        const p3   = orbitPos(sh.r, sh.incl, Omega, (t / 64) * Math.PI * 2);
+        const proj = project(p3, camY, cx, cy, sc);
+        pts.push(proj);
+      }
+      const alpha = [0.07, 0.055, 0.04][si] || 0.05;
+      sctx.beginPath();
+      pts.forEach((p, i) => i === 0 ? sctx.moveTo(p.sx, p.sy) : sctx.lineTo(p.sx, p.sy));
+      sctx.closePath();
+      sctx.strokeStyle = `rgba(0,180,220,${alpha})`; sctx.lineWidth = 0.8; sctx.stroke();
+    }
+  });
+
+  // ── Update sat positions & project ──
+  const projected = sats.map(sat => {
+    sat.alpha += sat.speed * dt;
+    const p3   = orbitPos(sat.r, sat.incl, sat.Omega, sat.alpha);
+    const proj = project(p3, camY, cx, cy, sc);
+    // Occlusion: behind Earth if sz < 0 and inside Earth disk
+    const dx = proj.sx - cx, dy = proj.sy - cy;
+    const behindEarth = proj.sz < 0 && Math.sqrt(dx*dx + dy*dy) < earthR * 0.96;
+    return { sat, proj, behindEarth };
+  });
+
+  // ── Ground stations & signal beams ──
+  // Determine signal color based on latency / freeze
+  const isFrozen = Date.now() < freezeUntilWallMs;
+  let beamR = 0, beamG = 217, beamB = 245, beamA = 0.28; // default cyan
+  let pulseR = 0, pulseG = 217, pulseB = 245;
+  if (isFrozen) {
+    beamR = 255; beamG = 71;  beamB = 87;  beamA = 0.35;
+    pulseR = 255; pulseG = 71; pulseB = 87;
+  } else if (currentLatMs > 3000) {
+    beamR = 255; beamG = 71;  beamB = 87;  beamA = 0.25;
+    pulseR = 255; pulseG = 71; pulseB = 87;
+  } else if (currentLatMs > 800) {
+    beamR = 245; beamG = 166; beamB = 35;  beamA = 0.25;
+    pulseR = 245; pulseG = 166; pulseB = 35;
+  }
+
+  const gndPts = GROUND.map(gs => {
+    const p3   = geoTo3D(gs.lat, gs.lon + camY * 0.15, 0.42);
+    const proj = project(p3, camY, cx, cy, sc);
+    const onFront = proj.sz >= 0;
+    return { proj, onFront };
+  });
+
+  gndPts.forEach((gnd, gi) => {
+    if (!gnd.onFront) return;
+
+    // Draw station marker
+    sctx.beginPath(); sctx.arc(gnd.proj.sx, gnd.proj.sy, 2.8, 0, Math.PI * 2);
+    sctx.fillStyle = '#00e676'; sctx.fill();
+    sctx.beginPath(); sctx.arc(gnd.proj.sx, gnd.proj.sy, 5.5, 0, Math.PI * 2);
+    sctx.strokeStyle = 'rgba(0,230,118,0.35)'; sctx.lineWidth = 1; sctx.stroke();
+
+    // Find nearest visible satellite
+    let nearest = null, nearestDist = Infinity;
+    projected.forEach(ps => {
+      if (ps.behindEarth) return;
+      const ddx = ps.proj.sx - gnd.proj.sx, ddy = ps.proj.sy - gnd.proj.sy;
+      const d = Math.sqrt(ddx*ddx + ddy*ddy);
+      if (d < nearestDist && d < earthR * 2.2) { nearestDist = d; nearest = ps; }
+    });
+
+    if (nearest) {
+      const x1 = gnd.proj.sx, y1 = gnd.proj.sy;
+      const x2 = nearest.proj.sx, y2 = nearest.proj.sy;
+
+      // Signal beam
+      sctx.beginPath(); sctx.moveTo(x1, y1); sctx.lineTo(x2, y2);
+      sctx.strokeStyle = `rgba(${beamR},${beamG},${beamB},${beamA})`;
+      sctx.lineWidth = 1; sctx.stroke();
+
+      // Animated packet dot
+      const phase = (satPulse + gi * 0.34) % 1;
+      const px = x1 + (x2 - x1) * phase, py = y1 + (y2 - y1) * phase;
+      sctx.beginPath(); sctx.arc(px, py, isFrozen ? 1.2 : 2.2, 0, Math.PI * 2);
+      sctx.fillStyle = `rgba(${pulseR},${pulseG},${pulseB},${isFrozen ? 0.5 : 0.95})`;
+      sctx.fill();
+
+      // Glow around packet
+      if (!isFrozen) {
+        sctx.beginPath(); sctx.arc(px, py, 5, 0, Math.PI * 2);
+        sctx.fillStyle = `rgba(${pulseR},${pulseG},${pulseB},0.12)`;
+        sctx.fill();
+      }
+    }
+  });
+
+  // ── Disruption scanlines overlay ──
+  if (isFrozen) {
+    for (let y = 0; y < H; y += 5) {
+      sctx.fillStyle = 'rgba(255,50,70,0.025)';
+      sctx.fillRect(0, y, W, 2);
+    }
+    sctx.fillStyle = 'rgba(255,71,87,0.55)';
+    sctx.font = 'bold 10px "Space Mono", monospace';
+    sctx.textAlign = 'center';
+    sctx.fillText('▪ SIGNAL DISRUPTED ▪', cx, H - 10);
+  }
+
+  // ── Draw satellites (back→front by depth) ──
+  projected.sort((a, b) => a.proj.sz - b.proj.sz);
+  projected.forEach(({ sat, proj, behindEarth }) => {
+    if (behindEarth) return;
+    const depth = Math.max(0, Math.min(1, (proj.sz + sat.r) / (sat.r * 2)));
+    const size  = 1.3 + depth * 1.8;
+    const alpha = 0.35 + depth * 0.65;
+
+    if (depth > 0.55) {
+      sctx.beginPath(); sctx.arc(proj.sx, proj.sy, size * 2.8, 0, Math.PI * 2);
+      sctx.fillStyle = `rgba(0,200,240,${((depth - 0.55) * 0.18).toFixed(3)})`; sctx.fill();
+    }
+
+    sctx.beginPath(); sctx.arc(proj.sx, proj.sy, size, 0, Math.PI * 2);
+    sctx.globalAlpha = alpha;
+    sctx.fillStyle   = sat.col;
+    sctx.fill();
+    sctx.globalAlpha = 1;
+  });
+
+  // ── Shell legend (top-left) ──
+  const shellLabels = ['53° · SHELL 1', '70° · SHELL 2', '97° · POLAR'];
+  const shellCols   = ['rgba(0,217,245,0.75)', 'rgba(0,184,212,0.75)', 'rgba(0,150,179,0.75)'];
+  sctx.font = '8px "Space Mono", monospace'; sctx.textAlign = 'left';
+  shellLabels.forEach((lbl, i) => {
+    sctx.fillStyle = shellCols[i];
+    sctx.fillText(lbl, 7, 13 + i * 11);
+  });
+
+  // ── Satellite count (bottom-right) ──
+  const visCount = projected.filter(p => !p.behindEarth).length;
+  document.getElementById('satCount').textContent = `${visCount} / ${sats.length} vis`;
+
+  sctx.fillStyle = 'rgba(61,80,112,0.65)';
+  sctx.font = '8px "Space Mono", monospace'; sctx.textAlign = 'right';
+  sctx.fillText(`${visCount}/${sats.length} SATS VISIBLE`, W - 6, H - 6);
+
+  requestAnimationFrame(drawSatViz);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Helpers
+// ═══════════════════════════════════════════════════════════════════
+function latClass(ms) {
+  if (ms < 800)  return 'c-green';
+  if (ms < 3000) return 'c-amber';
+  return 'c-red';
+}
+function setLatency(id, ms) {
+  const el = document.getElementById(id);
+  el.textContent = Math.round(ms);
+  el.className   = 'stat-card-value ' + latClass(ms);
+}
+function showOverlay(id, show) {
+  const el = document.getElementById(id);
+  if (show) el.classList.remove('gone');
+  else      el.classList.add('gone');
+}
+function fmtTime(s) {
+  const m = Math.floor(s / 60), ss = (s % 60).toFixed(3).padStart(6, '0');
+  return `${String(m).padStart(2,'0')}:${ss}`;
+}
+function fmtMs(v) {
+  return v >= 1000 ? (v/1000).toFixed(1) + 's' : Math.round(v) + 'ms';
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Init — start both animation loops
+// ═══════════════════════════════════════════════════════════════════
+loadMediaList();
+requestAnimationFrame(drawChart);
+requestAnimationFrame(ts => { lastSatTs = ts; drawSatViz(ts); });
+</script>
+
+</body>
+</html>
