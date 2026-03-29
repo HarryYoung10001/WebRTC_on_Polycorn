@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -21,9 +22,9 @@ import (
 const (
 	pionServerIP    = "127.0.0.2"
 	pionServerPort  = "5004"
-	testDurationSec = 45
+	testDurationSec = 45 // fallback default; overridden by TEST_DURATION env var
 
-	defaultVideoFile = "media/bbb_45s.h264"
+	defaultVideoFile = "media/bbb_4mbps.h264"
 	defaultVideoFPS  = 30
 )
 
@@ -34,6 +35,20 @@ var signalingAddr = func() string {
 	return "127.0.0.1:8080"
 }()
 
+// FrameRecord 记录服务端收到的每一帧信息
+type FrameRecord struct {
+	RecvTimeUs int64  `json:"recv_time_us"`
+	SeqNum     uint16 `json:"seq_num"` // 该帧最后一个 RTP 包的序列号
+}
+
+// LostFrameInfo 描述一次丢帧事件
+type LostFrameInfo struct {
+	// 估算的丢帧发生时间（相对测试开始，ms）
+	TimeOffsetMs float64 `json:"time_offset_ms"`
+	// 连续丢失帧数估计
+	Count int `json:"count"`
+}
+
 type TestResult struct {
 	TestID         string    `json:"test_id"`
 	Timestamp      time.Time `json:"timestamp"`
@@ -43,6 +58,21 @@ type TestResult struct {
 	ThroughputMbps float64   `json:"throughput_mbps"`
 	PacketsTx      int       `json:"packets_tx"`
 	PacketsRx      int       `json:"packets_rx"`
+
+	// Latency (per-frame, based on RTP Marker bit)
+	AvgLatencyMs   float64   `json:"avg_latency_ms,omitempty"`
+	P50LatencyMs   float64   `json:"p50_latency_ms,omitempty"`
+	P95LatencyMs   float64   `json:"p95_latency_ms,omitempty"`
+	P99LatencyMs   float64   `json:"p99_latency_ms,omitempty"`
+	FrameCount     int       `json:"frame_count,omitempty"`
+	FrameLatencies []float64 `json:"frame_latencies_ms,omitempty"`
+
+	// 丢帧统计
+	FramesSent      int             `json:"frames_sent"`
+	FramesReceived  int             `json:"frames_received"`
+	FramesLost      int             `json:"frames_lost"`
+	FrameLossRate   float64         `json:"frame_loss_rate"` // 0.0~1.0
+	LostFrameEvents []LostFrameInfo `json:"lost_frame_events,omitempty"`
 }
 
 var (
@@ -52,6 +82,10 @@ var (
 	packetsTx     int
 	packetsRx     int
 	testStartTime time.Time
+
+	// 服务端：记录每帧（Marker=1 的 RTP 包）的到达时间和序列号
+	srvFrameMu      sync.Mutex
+	srvFrameRecords []FrameRecord
 )
 
 func getVideoFile() string {
@@ -69,6 +103,17 @@ func getVideoFPS() int {
 	}
 	return defaultVideoFPS
 }
+
+func getTestDurationSec() int {
+	if v := os.Getenv("TEST_DURATION"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return testDurationSec
+}
+
+// ---- server ------------------------------------------------------------------
 
 func runServer() {
 	listenAddr := "0.0.0.0:" + pionServerPort
@@ -94,6 +139,7 @@ func runServer() {
 
 		for {
 			pkt, _, err := track.ReadRTP()
+			tRecv := time.Now().UnixMicro()
 			if err != nil {
 				fmt.Println("[server] track read ended:", err)
 				return
@@ -103,6 +149,16 @@ func runServer() {
 			bytesRx += int64(len(pkt.Payload))
 			packetsRx++
 			resultMu.Unlock()
+
+			// Marker=1 表示一帧的最后一个 RTP 包到达，即一帧完整收到
+			if pkt.Marker {
+				srvFrameMu.Lock()
+				srvFrameRecords = append(srvFrameRecords, FrameRecord{
+					RecvTimeUs: tRecv,
+					SeqNum:     pkt.SequenceNumber,
+				})
+				srvFrameMu.Unlock()
+			}
 		}
 	})
 
@@ -140,6 +196,19 @@ func runServer() {
 		}
 	})
 
+	// /frame_stats 现在返回完整的 FrameRecord 列表（含序列号）
+	http.HandleFunc("/frame_stats", func(w http.ResponseWriter, r *http.Request) {
+		srvFrameMu.Lock()
+		out := make([]FrameRecord, len(srvFrameRecords))
+		copy(out, srvFrameRecords)
+		srvFrameMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(out); err != nil {
+			http.Error(w, "encode frame_stats failed: "+err.Error(), http.StatusInternalServerError)
+		}
+	})
+
 	fmt.Printf("[server] signaling HTTP on %s\n", signalingAddr)
 	fmt.Printf("[server] pion TCP on %s:%s\n", pionServerIP, pionServerPort)
 
@@ -148,9 +217,12 @@ func runServer() {
 	}
 }
 
+// ---- client ------------------------------------------------------------------
+
 func runClient() {
 	videoFile := getVideoFile()
 	videoFPS := getVideoFPS()
+	durationSec := getTestDurationSec()
 
 	api, err := newClientAPI()
 	if err != nil {
@@ -222,19 +294,27 @@ func runClient() {
 
 	resp, err := http.Post("http://"+signalingAddr+"/offer", "application/json", bytes.NewReader(offerJSON))
 	if err != nil {
-		panic(err)
+		panic(fmt.Errorf("POST /offer failed: %w", err))
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		panic(fmt.Errorf("POST /offer returned status %d: %s", resp.StatusCode, string(body)))
+	}
+
 	var answer webrtc.SessionDescription
 	if err := json.NewDecoder(resp.Body).Decode(&answer); err != nil {
-		panic(err)
+		panic(fmt.Errorf("decode answer failed: %w", err))
 	}
 	if err := pc.SetRemoteDescription(answer); err != nil {
 		panic(err)
 	}
 
 	fmt.Println("[client] waiting for connection...")
+	fmt.Printf("[client] test duration: %ds\n", durationSec)
+
+	var sendTimes []int64
 
 	select {
 	case <-connectedChan:
@@ -244,8 +324,10 @@ func runClient() {
 
 		testStartTime = time.Now()
 
-		if err := streamH264(videoTrack, videoFile, videoFPS, testDurationSec); err != nil {
-			fmt.Println("[client] stream error:", err)
+		var streamErr error
+		sendTimes, streamErr = streamH264(videoTrack, videoFile, videoFPS, durationSec)
+		if streamErr != nil {
+			fmt.Println("[client] stream error:", streamErr)
 			os.Exit(1)
 		}
 
@@ -256,8 +338,12 @@ func runClient() {
 		os.Exit(1)
 	}
 
+	time.Sleep(500 * time.Millisecond)
+
+	lossResult := fetchFrameStats(sendTimes, videoFPS)
+
 	resultMu.Lock()
-	result := calculateResult()
+	result := calculateResult(lossResult, durationSec)
 	resultMu.Unlock()
 
 	saveResult(result)
@@ -267,22 +353,42 @@ func runClient() {
 	fmt.Printf("  Throughput: %.2f Mbps\n", result.ThroughputMbps)
 	fmt.Printf("  Packets: %d tx / %d rx\n", result.PacketsTx, result.PacketsRx)
 	fmt.Printf("  Bytes: %d tx / %d rx\n", result.TotalBytesTx, result.TotalBytesRx)
-	fmt.Printf("  Results saved to: logs/webrtc/results.json\n")
+	fmt.Printf("  Frames: %d sent / %d received / %d lost (%.1f%%)\n",
+		result.FramesSent, result.FramesReceived, result.FramesLost,
+		result.FrameLossRate*100)
+	if result.FrameCount > 0 {
+		fmt.Printf("  Latency (frames=%d): avg=%.1fms p50=%.1fms p95=%.1fms p99=%.1fms\n",
+			result.FrameCount,
+			result.AvgLatencyMs,
+			result.P50LatencyMs,
+			result.P95LatencyMs,
+			result.P99LatencyMs,
+		)
+	}
+	if len(result.LostFrameEvents) > 0 {
+		fmt.Printf("  Loss events: %d burst(s)\n", len(result.LostFrameEvents))
+		for i, e := range result.LostFrameEvents {
+			fmt.Printf("    [%d] t=%.0fms, ~%d frame(s) lost\n", i+1, e.TimeOffsetMs, e.Count)
+		}
+	}
+	fmt.Printf("  Results saved to: %s\n", os.Getenv("LOG_DIR"))
 
 	_ = pc.Close()
 	os.Exit(0)
 }
 
-func streamH264(track *webrtc.TrackLocalStaticSample, path string, fps int, durationSec int) error {
+// ---- streaming ---------------------------------------------------------------
+
+func streamH264(track *webrtc.TrackLocalStaticSample, path string, fps int, durationSec int) ([]int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("open h264 file: %w", err)
+		return nil, fmt.Errorf("open h264 file: %w", err)
 	}
 	defer f.Close()
 
 	reader, err := h264reader.NewReader(f)
 	if err != nil {
-		return fmt.Errorf("create h264 reader: %w", err)
+		return nil, fmt.Errorf("create h264 reader: %w", err)
 	}
 
 	frameDuration := time.Second / time.Duration(fps)
@@ -291,30 +397,34 @@ func streamH264(track *webrtc.TrackLocalStaticSample, path string, fps int, dura
 
 	endTime := time.Now().Add(time.Duration(durationSec) * time.Second)
 
+	var sendTimes []int64
+
 	for time.Now().Before(endTime) {
 		nal, err := reader.NextNAL()
 		if err == io.EOF {
 			if _, err := f.Seek(0, 0); err != nil {
-				return fmt.Errorf("seek h264 file: %w", err)
+				return sendTimes, fmt.Errorf("seek h264 file: %w", err)
 			}
 			reader, err = h264reader.NewReader(f)
 			if err != nil {
-				return fmt.Errorf("recreate h264 reader: %w", err)
+				return sendTimes, fmt.Errorf("recreate h264 reader: %w", err)
 			}
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("read nal failed: %w", err)
+			return sendTimes, fmt.Errorf("read nal failed: %w", err)
 		}
 
 		<-ticker.C
 
+		tSend := time.Now().UnixMicro()
 		if err := track.WriteSample(media.Sample{
 			Data:     nal.Data,
 			Duration: frameDuration,
 		}); err != nil {
-			return fmt.Errorf("write sample failed: %w", err)
+			return sendTimes, fmt.Errorf("write sample failed: %w", err)
 		}
+		sendTimes = append(sendTimes, tSend)
 
 		resultMu.Lock()
 		bytesTx += int64(len(nal.Data))
@@ -322,28 +432,181 @@ func streamH264(track *webrtc.TrackLocalStaticSample, path string, fps int, dura
 		resultMu.Unlock()
 	}
 
-	return nil
+	return sendTimes, nil
 }
 
-func calculateResult() TestResult {
+// ---- 丢帧分析 ---------------------------------------------------------------
+
+// frameLossResult 汇总丢帧分析结果
+type frameLossResult struct {
+	FrameLatMs      []float64
+	FramesSent      int
+	FramesReceived  int
+	FramesLost      int
+	FrameLossRate   float64
+	LostFrameEvents []LostFrameInfo
+}
+
+// fetchFrameStats 从服务端拉取帧记录，分析丢帧情况
+func fetchFrameStats(sendUs []int64, fps int) frameLossResult {
+	resp, err := http.Get("http://" + signalingAddr + "/frame_stats")
+	if err != nil {
+		fmt.Println("[client] failed to fetch server frame stats:", err)
+		return frameLossResult{FramesSent: len(sendUs)}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("[client] GET /frame_stats returned status %d: %s\n", resp.StatusCode, string(body))
+		return frameLossResult{FramesSent: len(sendUs)}
+	}
+
+	var records []FrameRecord
+	if err := json.NewDecoder(resp.Body).Decode(&records); err != nil {
+		fmt.Println("[client] failed to decode frame stats:", err)
+		return frameLossResult{FramesSent: len(sendUs)}
+	}
+
+	sent := len(sendUs)
+	recv := len(records)
+	lost := sent - recv
+	if lost < 0 {
+		lost = 0
+	}
+	lossRate := 0.0
+	if sent > 0 {
+		lossRate = float64(lost) / float64(sent)
+	}
+
+	fmt.Printf("[client] frames: %d sent, %d received, %d lost (%.1f%%)\n",
+		sent, recv, lost, lossRate*100)
+
+	// ---- 计算帧延迟（按位置配对，丢帧时按 testStartTime 偏移对齐） ----
+	// 用到达时间间隙来推断哪些位置发生了丢帧
+	lostEvents := detectLossEvents(sendUs, records, fps)
+
+	// 延迟配对：用实际到达的 recv 数量做上限
+	n := recv
+	if n > sent {
+		n = sent
+	}
+	lats := make([]float64, 0, n)
+	recvIdx := 0
+	for sendIdx := 0; sendIdx < sent && recvIdx < recv; sendIdx++ {
+		// 简单顺序配对（丢帧导致少量配对偏差，后续可用序列号改进）
+		lats = append(lats, float64(records[recvIdx].RecvTimeUs-sendUs[sendIdx])/1000.0)
+		recvIdx++
+	}
+
+	return frameLossResult{
+		FrameLatMs:      lats,
+		FramesSent:      sent,
+		FramesReceived:  recv,
+		FramesLost:      lost,
+		FrameLossRate:   lossRate,
+		LostFrameEvents: lostEvents,
+	}
+}
+
+// detectLossEvents 通过分析服务端帧到达时间间隙，推断丢帧事件的时间位置和数量
+//
+// 原理：连续帧到达间隔期望值 = 1/fps 秒。
+// 若间隔 > 1.5 * framePeriod，则认为中间有帧丢失，
+// 丢失帧数 ≈ round(gap/framePeriod) - 1
+func detectLossEvents(sendUs []int64, records []FrameRecord, fps int) []LostFrameInfo {
+	if len(records) < 2 || fps <= 0 {
+		return nil
+	}
+
+	framePeriodUs := int64(1_000_000 / fps) // 帧周期，微秒
+	threshold := framePeriodUs * 3 / 2      // 超过 1.5 倍帧周期视为有丢帧
+
+	testStartUs := int64(0)
+	if len(sendUs) > 0 {
+		testStartUs = sendUs[0]
+	}
+
+	var events []LostFrameInfo
+	for i := 1; i < len(records); i++ {
+		gap := records[i].RecvTimeUs - records[i-1].RecvTimeUs
+		if gap > threshold {
+			// 估算丢失帧数（gap 里有多少个"帧周期"，减去正常的那 1 帧）
+			lostCount := int(gap/framePeriodUs) - 1
+			if lostCount < 1 {
+				lostCount = 1
+			}
+			// 丢帧事件发生时间：取上一帧到达后的时间点（相对测试开始，ms）
+			offsetMs := float64(records[i-1].RecvTimeUs-testStartUs) / 1000.0
+			events = append(events, LostFrameInfo{
+				TimeOffsetMs: offsetMs,
+				Count:        lostCount,
+			})
+		}
+	}
+	return events
+}
+
+// ---- percentile / result / save--------------------------
+
+func percentile(sorted []float64, p float64) float64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	idx := p / 100.0 * float64(len(sorted)-1)
+	lo := int(idx)
+	hi := lo + 1
+	if hi >= len(sorted) {
+		return sorted[len(sorted)-1]
+	}
+	frac := idx - float64(lo)
+	return sorted[lo]*(1-frac) + sorted[hi]*frac
+}
+
+func calculateResult(lr frameLossResult, durationSec int) TestResult {
 	duration := time.Since(testStartTime).Seconds()
 	if duration <= 0 {
-		duration = float64(testDurationSec)
+		duration = float64(durationSec)
 	}
 
 	totalBytes := bytesTx + bytesRx
 	throughput := float64(totalBytes) * 8 / duration / 1e6
 
-	return TestResult{
-		TestID:         fmt.Sprintf("webrtc-video-%d", time.Now().Unix()),
-		Timestamp:      time.Now(),
-		DurationSec:    testDurationSec,
-		TotalBytesTx:   bytesTx,
-		TotalBytesRx:   bytesRx,
-		ThroughputMbps: throughput,
-		PacketsTx:      packetsTx,
-		PacketsRx:      packetsRx,
+	r := TestResult{
+		TestID:          fmt.Sprintf("webrtc-video-%d", time.Now().Unix()),
+		Timestamp:       time.Now(),
+		DurationSec:     durationSec,
+		TotalBytesTx:    bytesTx,
+		TotalBytesRx:    bytesRx,
+		ThroughputMbps:  throughput,
+		PacketsTx:       packetsTx,
+		PacketsRx:       packetsRx,
+		FramesSent:      lr.FramesSent,
+		FramesReceived:  lr.FramesReceived,
+		FramesLost:      lr.FramesLost,
+		FrameLossRate:   lr.FrameLossRate,
+		LostFrameEvents: lr.LostFrameEvents,
 	}
+
+	if len(lr.FrameLatMs) > 0 {
+		sorted := make([]float64, len(lr.FrameLatMs))
+		copy(sorted, lr.FrameLatMs)
+		sort.Float64s(sorted)
+
+		var sum float64
+		for _, v := range sorted {
+			sum += v
+		}
+
+		r.FrameCount     = len(lr.FrameLatMs)
+		r.AvgLatencyMs   = sum / float64(len(sorted))
+		r.P50LatencyMs   = percentile(sorted, 50)
+		r.P95LatencyMs   = percentile(sorted, 95)
+		r.P99LatencyMs   = percentile(sorted, 99)
+		r.FrameLatencies = lr.FrameLatMs
+	}
+
+	return r
 }
 
 func saveResult(result TestResult) {
@@ -385,7 +648,25 @@ func saveResult(result TestResult) {
 	fmt.Fprintf(summaryFile, "Throughput: %.2f Mbps\n", result.ThroughputMbps)
 	fmt.Fprintf(summaryFile, "Packets: %d tx / %d rx\n", result.PacketsTx, result.PacketsRx)
 	fmt.Fprintf(summaryFile, "Bytes: %d tx / %d rx\n", result.TotalBytesTx, result.TotalBytesRx)
+	fmt.Fprintf(summaryFile, "Frames: %d sent / %d received / %d lost (%.1f%%)\n",
+		result.FramesSent, result.FramesReceived, result.FramesLost,
+		result.FrameLossRate*100)
+	if len(result.LostFrameEvents) > 0 {
+		fmt.Fprintf(summaryFile, "Loss events:\n")
+		for i, e := range result.LostFrameEvents {
+			fmt.Fprintf(summaryFile, "  [%d] t=%.0fms, ~%d frame(s)\n", i+1, e.TimeOffsetMs, e.Count)
+		}
+	}
+	if result.FrameCount > 0 {
+		fmt.Fprintf(summaryFile, "Frames measured: %d\n", result.FrameCount)
+		fmt.Fprintf(summaryFile, "Latency avg: %.2f ms\n", result.AvgLatencyMs)
+		fmt.Fprintf(summaryFile, "Latency p50: %.2f ms\n", result.P50LatencyMs)
+		fmt.Fprintf(summaryFile, "Latency p95: %.2f ms\n", result.P95LatencyMs)
+		fmt.Fprintf(summaryFile, "Latency p99: %.2f ms\n", result.P99LatencyMs)
+	}
 }
+
+// ---- main --------------------------------------------------------------------
 
 func main() {
 	role := flag.String("role", "", "server or client")
